@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Use a custom build directory to avoid ".next" permission/lock issues on Windows
-  distDir: '.next_build',
+  // Use .next_build locally to avoid Windows permission issues, but standard .next on Netlify
+  distDir: process.env.NETLIFY ? '.next' : '.next_build',
   experimental: {
     serverActions: {
       allowedOrigins: []
