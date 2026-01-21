@@ -114,10 +114,7 @@ export default function Home() {
 
       {result && (
         <div style={{ background: '#f9fff9', border: '1px solid #ccffcc', padding: '20px', borderRadius: '6px' }}>
-          <h3 style={{ marginTop: 0, color: '#006600' }}>✅ Resultado:</h3>
-          <div style={{ background: '#eee', padding: '10px', borderRadius: '4px', overflowX: 'auto', marginBottom: '15px' }}>
-            <pre style={{ margin: 0, fontSize: '12px' }}>{JSON.stringify(result, null, 2)}</pre>
-          </div>
+          <h3 style={{ marginTop: 0, color: '#006600' }}>✅ Resultado:</h3>          
           
           {result.view_url && (
             <div style={{ textAlign: 'center', marginTop: '20px' }}>
