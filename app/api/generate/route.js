@@ -1,0 +1,59 @@
+import { NextResponse } from 'next/server';
+import clientPromise from '@/lib/mongodb';
+import { GeminiImageService } from '@/lib/gemini';
+import sharp from 'sharp';
+import { Binary } from 'mongodb';
+
+export async function POST(request) {
+  try {
+    const { prompt, model = "nano-banana-pro" } = await request.json();
+
+    const apiKey = process.env.APIYI_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json({ success: false, message: "API Key not configured" }, { status: 500 });
+    }
+
+    // 1. Generate Image
+    const service = new GeminiImageService(apiKey);
+    const result = await service.generateImageBytes(prompt, model);
+
+    if (!result.success) {
+      return NextResponse.json({ success: false, message: result.error }, { status: 502 });
+    }
+
+    // 2. Compress Image using Sharp
+    const compressedBuffer = await sharp(result.data)
+      .jpeg({ quality: 70, mozjpeg: true })
+      .toBuffer();
+
+    // 3. Save to MongoDB
+    const client = await clientPromise;
+    const db = client.db(process.env.MONGO_DB_NAME || "zumidb");
+    const collection = db.collection("generated_images");
+
+    const doc = {
+      prompt,
+      model,
+      image_data: new Binary(compressedBuffer),
+      content_type: "image/jpeg",
+      created_at: new Date(),
+    };
+
+    const insertResult = await collection.insertOne(doc);
+    const imageId = insertResult.insertedId.toString();
+
+    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
+    const viewUrl = `${baseUrl}/api/view/${imageId}`;
+
+    return NextResponse.json({
+      success: true,
+      image_id: imageId,
+      message: `Image saved. View at: ${viewUrl}`,
+      view_url: viewUrl
+    });
+
+  } catch (error) {
+    console.error(error);
+    return NextResponse.json({ success: false, message: error.message }, { status: 500 });
+  }
+}
