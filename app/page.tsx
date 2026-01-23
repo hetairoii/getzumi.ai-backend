@@ -17,7 +17,7 @@ interface ApiResult {
 declare const puter: any;
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'image' | 'audio'>('image');
+  const [activeTab, setActiveTab] = useState<'image' | 'audio' | 'video'>('image');
   
   // Audio State
   const [audioMode, setAudioMode] = useState<'tts' | 's2s'>('tts');
@@ -26,6 +26,14 @@ export default function Home() {
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [audioResult, setAudioResult] = useState<{ view_url: string } | null>(null);
   const [audioLoading, setAudioLoading] = useState(false);
+
+  // Video State
+  const [videoPrompt, setVideoPrompt] = useState<string>('');
+  const [videoModel, setVideoModel] = useState<string>('sora_video2');
+  const [videoLoading, setVideoLoading] = useState<boolean>(false);
+  const [videoProgress, setVideoProgress] = useState<string>(''); // For text updates like "> Progress: 36%"
+  const [videoPercent, setVideoPercent] = useState<number>(0); // Numeric progress
+  const [videoResult, setVideoResult] = useState<{ video_url: string } | null>(null);
 
   // Image State
   const [prompt, setPrompt] = useState<string>('');
@@ -54,6 +62,7 @@ export default function Home() {
   // Gallery State
   const [myImages, setMyImages] = useState<any[]>([]);
   const [myAudios, setMyAudios] = useState<any[]>([]);
+  const [myVideos, setMyVideos] = useState<any[]>([]);
   const [showGallery, setShowGallery] = useState<boolean>(false);
   const [galleryLoading, setGalleryLoading] = useState<boolean>(false);
 
@@ -125,10 +134,26 @@ export default function Home() {
     }
   };
 
+  const fetchMyVideos = async () => {
+    setGalleryLoading(true);
+    try {
+      const res = await fetch('/api/my-videos');
+      const data = await res.json();
+      if (data.success) {
+        setMyVideos(data.videos);
+      }
+    } catch (e) {
+        console.error("Error fetching videos", e);
+    } finally {
+        setGalleryLoading(false);
+    }
+  };
+
   const toggleGallery = () => {
     if (!showGallery) {
       if (activeTab === 'image') fetchMyImages();
-      else fetchMyAudios();
+      else if (activeTab === 'audio') fetchMyAudios();
+      else if (activeTab === 'video') fetchMyVideos();
     }
     setShowGallery(!showGallery);
   };
@@ -387,6 +412,90 @@ export default function Home() {
   };
 
 
+  const handleVideoGenerate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) {
+        setError("Debes iniciar sesión");
+        return;
+    }
+    setVideoLoading(true);
+    setVideoResult(null);
+    setVideoProgress('');
+    setVideoPercent(0);
+    setError(null);
+
+    try {
+        const res = await fetch('/api/video/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                prompt: videoPrompt,
+                model: videoModel
+            })
+        });
+
+        if (!res.ok) throw new Error("Error starting video generation");
+        if (!res.body) throw new Error("No response body");
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let loop = true;
+        let accumulated = "";
+
+        while (loop) {
+            const { done, value } = await reader.read();
+            if (done) {
+                loop = false;
+                break;
+            }
+            const chunk = decoder.decode(value, { stream: true });
+            accumulated += chunk;
+            
+            // Parse progress updates from stream
+            const lines = accumulated.split('\n');
+            // Keep the last partial line in accumulated
+            accumulated = lines.pop() || "";
+
+            for (const line of lines) {
+                if (line.trim().startsWith('data: ') && !line.includes('[DONE]')) {
+                    try {
+                        const jsonStr = line.replace('data: ', '').trim();
+                        const json = JSON.parse(jsonStr);
+                        if (json.choices && json.choices[0].delta && json.choices[0].delta.content) {
+                            const content = json.choices[0].delta.content;
+                            
+                            // Parse progress percentage
+                            // Look for "Progress: 36.0%"
+                            const pctMatch = content.match(/Progress:\s+(\d+(?:\.\d+)?)/);
+                            if (pctMatch) {
+                                setVideoPercent(parseFloat(pctMatch[1]));
+                            }
+
+                            setVideoProgress(prev => {
+                                const newText = prev + content;
+                                // Try to extract URL from the accumulating text
+                                const urlMatch = newText.match(/\[.*?\]\((https?:\/\/[^\s)]+)\)/);
+                                if (urlMatch && urlMatch[1]) {
+                                    setVideoResult({ video_url: urlMatch[1] });
+                                }
+                                return newText;
+                            });
+                        }
+                    } catch (e) { }
+                }
+            }
+        }
+        setVideoPercent(100);
+
+    } catch (err: unknown) {
+        let msg = "Unknown error";
+        if (err instanceof Error) msg = err.message;
+        setError(msg);
+    } finally {
+        setVideoLoading(false);
+    }
+  };
+
   return (
     <main style={{ maxWidth: '800px', margin: '40px auto', padding: '20px', background: 'white', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
       <h1 style={{ borderBottom: '2px solid #eaeaea', paddingBottom: '10px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -395,7 +504,7 @@ export default function Home() {
             <div style={{ fontSize: '14px', fontWeight: 'normal' }}>
                 👤 {user.username} 
                 <button onClick={toggleGallery} style={{ marginLeft: '10px', padding: '4px 8px', border: '1px solid #0070f3', borderRadius: '4px', background: showGallery ? '#0070f3' : 'transparent', color: showGallery ? 'white' : '#0070f3', cursor: 'pointer' }}>
-                  {activeTab === 'image' ? '🖼️ Mis Imágenes' : '🎧 Mis Audios'}
+                  {activeTab === 'image' ? '🖼️ Mis Imágenes' : activeTab === 'audio' ? '🎧 Mis Audios' : '🎥 Mis Videos'}
                 </button>
                 <button onClick={handleLogout} style={{ marginLeft: '10px', padding: '4px 8px', border: '1px solid #ccc', borderRadius: '4px', background: 'transparent', cursor: 'pointer' }}>Salir</button>
             </div>
@@ -406,17 +515,17 @@ export default function Home() {
       {showGallery && user && (
         <div style={{ marginBottom: '30px', padding: '20px', background: '#f0f8ff', borderRadius: '8px', border: '1px solid #cce5ff' }}>
           <h3 style={{ marginTop: 0, display: 'flex', justifyContent: 'space-between' }}>
-            {activeTab === 'image' ? '🖼️ Mi Galería de Imágenes' : '🎧 Mi Biblioteca de Audio'}
-            <button onClick={activeTab === 'image' ? fetchMyImages : fetchMyAudios} style={{ fontSize: '12px', padding: '2px 8px', cursor: 'pointer' }}>🔄 Actualizar</button>
+            {activeTab === 'image' ? '🖼️ Mi Galería de Imágenes' : activeTab === 'audio' ? '🎧 Mi Biblioteca de Audio' : '🎥 Mi Biblioteca de Videos'}
+            <button onClick={activeTab === 'image' ? fetchMyImages : activeTab === 'audio' ? fetchMyAudios : fetchMyVideos} style={{ fontSize: '12px', padding: '2px 8px', cursor: 'pointer' }}>🔄 Actualizar</button>
           </h3>
           
           {galleryLoading ? (
             <p>Cargando...</p>
-          ) : (activeTab === 'image' ? myImages.length === 0 : myAudios.length === 0) ? (
-            <p style={{ color: '#666', fontStyle: 'italic' }}>No tienes {activeTab === 'image' ? 'imágenes' : 'audios'} guardadas aún.</p>
+          ) : (activeTab === 'image' ? myImages.length === 0 : activeTab === 'audio' ? myAudios.length === 0 : myVideos.length === 0) ? (
+            <p style={{ color: '#666', fontStyle: 'italic' }}>No tienes {activeTab === 'image' ? 'imágenes' : activeTab === 'audio' ? 'audios' : 'videos'} guardadas aún.</p>
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '15px' }}>
-              {activeTab === 'image' ? myImages.map((img) => (
+              {activeTab === 'image' && myImages.map((img) => (
                 <div key={img.id} style={{ background: 'white', padding: '10px', borderRadius: '6px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
                   <a href={img.view_url} target="_blank" rel="noopener noreferrer">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -429,7 +538,9 @@ export default function Home() {
                     {new Date(img.created_at).toLocaleDateString()}
                   </p>
                 </div>
-              )) : myAudios.map((audio) => (
+              ))}
+              
+              {activeTab === 'audio' && myAudios.map((audio) => (
                 <div key={audio.id} style={{ background: 'white', padding: '10px', borderRadius: '6px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
                    <div style={{ width: '100%', aspectRatio: '1/1', background: '#eee', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', marginBottom: '5px' }}>
                        <span style={{ fontSize: '40px' }}>🎵</span>
@@ -441,6 +552,21 @@ export default function Home() {
                   </p>
                   <p style={{ fontSize: '10px', color: '#888', margin: '2px 0 0' }}>
                      {audio.provider} • {new Date(audio.created_at).toLocaleDateString()}
+                  </p>
+                </div>
+              ))}
+
+              {activeTab === 'video' && myVideos.map((video) => (
+                <div key={video.id} style={{ background: 'white', padding: '10px', borderRadius: '6px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+                   <div style={{ width: '100%', aspectRatio: '16/9', background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', marginBottom: '5px' }}>
+                       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+                       <video controls src={video.video_url} style={{ width: '100%', height: '100%' }} />
+                   </div>
+                   <p style={{ fontSize: '11px', margin: '5px 0 0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontWeight: 'bold' }} title={video.prompt}>
+                    {video.prompt}
+                  </p>
+                  <p style={{ fontSize: '10px', color: '#888', margin: '2px 0 0' }}>
+                     {new Date(video.created_at).toLocaleDateString()}
                   </p>
                 </div>
               ))}
@@ -534,7 +660,7 @@ export default function Home() {
 
       {/* Mode Switcher */}
       {user && (
-          <div style={{ display: 'flex', marginBottom: '20px', borderBottom: '1px solid #ddd' }}>
+          <div style={{ display: 'flex', marginBottom: '20px', borderBottom: '1px solid #ddd', gap: '5px' }}>
               <button 
                 onClick={() => setActiveTab('image')}
                 style={{ padding: '10px 20px', background: 'transparent', border: 'none', borderBottom: activeTab === 'image' ? '2px solid #0070f3' : 'none', fontWeight: activeTab === 'image' ? 'bold' : 'normal', cursor: 'pointer' }}
@@ -546,6 +672,19 @@ export default function Home() {
                 style={{ padding: '10px 20px', background: 'transparent', border: 'none', borderBottom: activeTab === 'audio' ? '2px solid #0070f3' : 'none', fontWeight: activeTab === 'audio' ? 'bold' : 'normal', cursor: 'pointer' }}
               >
                   🔊 Audio / Voz
+              </button>
+              <button 
+                onClick={() => setActiveTab('video')}
+                style={{ padding: '10px 20px', background: 'transparent', border: 'none', borderBottom: activeTab === 'video' ? '2px solid #0070f3' : 'none', fontWeight: activeTab === 'video' ? 'bold' : 'normal', cursor: 'pointer' }}
+              >
+                  🎥 Video (Sora)
+              </button>
+              <div style={{ flex: 1 }}></div>
+              <button
+                onClick={() => toggleGallery()}
+                style={{ padding: '10px 15px', background: showGallery ? '#eee' : 'transparent', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }}
+              >
+                 📂 {showGallery ? 'Ocultar Galería' : 'Ver Mis Generaciones'}
               </button>
           </div>
       )}
@@ -845,6 +984,92 @@ export default function Home() {
                  {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
                  <audio controls src={audioResult.view_url} style={{ width: '100%', marginBottom: '10px' }} autoPlay />
                  <p><a href={audioResult.view_url} target="_blank" style={{ color: '#0070f3' }}>Abrir Enlace Permanente</a></p>
+             </div>
+          )}
+
+      </div>
+      )}
+
+      {/* Video Tab */}
+      {activeTab === 'video' && (
+      <div style={{ border: '1px solid #ddd', borderRadius: '6px', padding: '20px', marginBottom: '20px', opacity: !user ? 0.5 : 1, pointerEvents: !user ? 'none' : 'auto' }}>
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: '15px' }}>
+            <span style={{ background: '#0070f3', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', marginRight: '10px' }}>POST</span>
+            <code style={{ background: '#f5f5f5', padding: '2px 6px', borderRadius: '4px' }}>/api/video/generate</code>
+          </div>
+
+          <form onSubmit={handleVideoGenerate}>
+            <div style={{ marginBottom: '15px' }}>
+                <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>Modelo:</label>
+                <select value={videoModel} onChange={(e)=>setVideoModel(e.target.value)} style={{ width: '100%', padding: '10px', borderRadius: '4px', background: 'white', border: '1px solid #ccc' }}>
+                    <option value="sora_video2">Sora Video 2 (Default)</option>
+                    <option value="sora_video2-landscape">Sora Video 2 (Landscape)</option>
+                    <option value="sora_video2-15s">Sora Video 2 (15s)</option>
+                    <option value="sora_video2-landscape-15s">Sora Video 2 (Landscape 15s)</option>
+                </select>
+            </div>
+            
+            <div style={{ marginBottom: '15px' }}>
+                <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>Prompt:</label>
+                <textarea 
+                    value={videoPrompt}
+                    onChange={(e) => setVideoPrompt(e.target.value)}
+                    placeholder="Describe el video que quieres generar..."
+                    style={{ width: '100%', padding: '10px', borderRadius: '4px', border: '1px solid #ccc', minHeight: '80px', fontFamily: 'inherit' }}
+                    required
+                />
+            </div>
+
+            <button 
+                type="submit" 
+                disabled={videoLoading}
+                style={{ 
+                  background: videoLoading ? '#ccc' : '#0070f3', 
+                  color: 'white', 
+                  border: 'none', 
+                  padding: '10px 20px', 
+                  borderRadius: '5px', 
+                  cursor: videoLoading ? 'not-allowed' : 'pointer',
+                  fontWeight: 'bold',
+                  fontSize: '16px',
+                  width: '100%'
+                }}
+              >
+                {videoLoading ? 'Generando...' : '🎬 Generar Video'}
+              </button>
+          </form>
+
+          {videoLoading && (
+            <div style={{ marginTop: '20px', marginBottom: '15px' }}>
+              <div style={{ width: '100%', background: '#eee', borderRadius: '4px', height: '10px', overflow: 'hidden' }}>
+                <div style={{ 
+                  width: `${videoPercent}%`, 
+                  background: '#0070f3', 
+                  height: '100%', 
+                  transition: 'width 0.3s ease-in-out' 
+                }} />
+              </div>
+              <p style={{ textAlign: 'center', fontSize: '12px', margin: '5px 0 0', color: '#666' }}>
+                Generando (Sora): {videoPercent.toFixed(1)}%
+              </p>
+              {/* Optional: detail logs toggle? For now we hide raw logs as requested */}
+            </div>
+          )}
+
+          {error && activeTab === 'video' && (
+            <div style={{ marginTop: '20px', background: '#fff2f2', border: '1px solid #ffcccc', color: '#cc0000', padding: '15px', borderRadius: '6px' }}>
+              <strong>Error:</strong> {error}
+            </div>
+          )}
+
+          {videoResult && (
+             <div style={{ marginTop: '20px', background: '#f9fff9', border: '1px solid #ccffcc', padding: '20px', borderRadius: '6px', textAlign: 'center' }}>
+                 <h3 style={{ marginTop: 0, color: '#006600' }}>✅ Video Generado</h3>
+                 <div style={{ width: '100%', aspectRatio: '16/9', background: '#000', marginBottom: '10px', borderRadius: '4px', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                     {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+                     <video controls src={videoResult.video_url} style={{ maxWidth: '100%', maxHeight: '100%' }} autoPlay />
+                 </div>
+                 <p><a href={videoResult.video_url} target="_blank" style={{ color: '#0070f3' }}>Abrir Enlace Permanente</a></p>
              </div>
           )}
 
