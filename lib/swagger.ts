@@ -295,6 +295,44 @@ const swaggerSpec = swaggerJsdoc(options);
       },
     },
   },
+  '/api/my-images': {
+    get: {
+      summary: 'Get user images',
+      description: 'Retrieves a list of all images generated and saved by the authenticated user.',
+      tags: ['Images'],
+      responses: {
+        200: {
+          description: 'List of user images',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  success: { type: 'boolean' },
+                  count: { type: 'integer' },
+                  images: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        id: { type: 'string' },
+                        prompt: { type: 'string' },
+                        model: { type: 'string' },
+                        created_at: { type: 'string' },
+                        view_url: { type: 'string' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        401: { description: 'Unauthorized - Authentication required' },
+      },
+    },
+  },
 };
+
 
 export default swaggerSpec;

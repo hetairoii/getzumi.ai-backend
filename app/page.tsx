@@ -18,6 +18,14 @@ export default function Home() {
   const [result, setResult] = useState<ApiResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   
+  // Auth State
+  const [user, setUser] = useState<{ username: string, email: string } | null>(null);
+  const [showAuth, setShowAuth] = useState<boolean>(true);
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
+  const [authForm, setAuthForm] = useState({ fullName: '', username: '', email: '', password: '' });
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(false);
+
   // Selection & Saving state
   const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
@@ -26,6 +34,11 @@ export default function Home() {
   // New states
   const [inputImages, setInputImages] = useState<File[]>([]);
   const [dragActive, setDragActive] = useState<boolean>(false);
+  
+  // Gallery State
+  const [myImages, setMyImages] = useState<any[]>([]);
+  const [showGallery, setShowGallery] = useState<boolean>(false);
+  const [galleryLoading, setGalleryLoading] = useState<boolean>(false);
 
   const [progress, setProgress] = useState<number>(0);
 
@@ -63,6 +76,65 @@ export default function Home() {
       return;
     }
     setInputImages(prev => [...prev, ...validFiles].slice(0, 3));
+  };
+
+  const fetchMyImages = async () => {
+    setGalleryLoading(true);
+    try {
+      const res = await fetch('/api/my-images');
+      const data = await res.json();
+      if (data.success) {
+        setMyImages(data.images);
+      }
+    } catch (e) {
+      console.error("Error fetching images", e);
+    } finally {
+      setGalleryLoading(false);
+    }
+  };
+
+  const toggleGallery = () => {
+    if (!showGallery) {
+      fetchMyImages();
+    }
+    setShowGallery(!showGallery);
+  };
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError(null);
+
+    const endpoint = authMode === 'signup' ? '/api/auth/signup' : '/api/auth/signin';
+    const payload = authMode === 'signup' 
+        ? authForm 
+        : { identifier: authForm.email || authForm.username, password: authForm.password };
+
+    try {
+        const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        
+        if (!res.ok) throw new Error(data.message || 'Auth failed');
+        
+        setUser(data.user);
+        setShowAuth(false);
+        setAuthForm({ fullName: '', username: '', email: '', password: '' }); // Clear sensitive data
+    } catch (err: unknown) {
+        setAuthError(err instanceof Error ? err.message : 'Authentication failed');
+    } finally {
+        setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+      await fetch('/api/auth/signout', { method: 'POST' });
+      setUser(null);
+      setShowAuth(true);
+      setResult(null);
   };
 
   const removeImage = (index: number) => {
@@ -178,11 +250,134 @@ export default function Home() {
 
   return (
     <main style={{ maxWidth: '800px', margin: '40px auto', padding: '20px', background: 'white', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
-      <h1 style={{ borderBottom: '2px solid #eaeaea', paddingBottom: '10px', marginBottom: '20px' }}>
-        🧪 Getzumi AI Endpoint Tester
+      <h1 style={{ borderBottom: '2px solid #eaeaea', paddingBottom: '10px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span>🧪 Getzumi AI Tester</span>
+        {user && (
+            <div style={{ fontSize: '14px', fontWeight: 'normal' }}>
+                👤 {user.username} 
+                <button onClick={toggleGallery} style={{ marginLeft: '10px', padding: '4px 8px', border: '1px solid #0070f3', borderRadius: '4px', background: showGallery ? '#0070f3' : 'transparent', color: showGallery ? 'white' : '#0070f3', cursor: 'pointer' }}>
+                  🖼️ Mis Imágenes
+                </button>
+                <button onClick={handleLogout} style={{ marginLeft: '10px', padding: '4px 8px', border: '1px solid #ccc', borderRadius: '4px', background: 'transparent', cursor: 'pointer' }}>Salir</button>
+            </div>
+        )}
       </h1>
 
-      <div style={{ border: '1px solid #ddd', borderRadius: '6px', padding: '20px', marginBottom: '20px' }}>
+      {/* Gallery Section */}
+      {showGallery && user && (
+        <div style={{ marginBottom: '30px', padding: '20px', background: '#f0f8ff', borderRadius: '8px', border: '1px solid #cce5ff' }}>
+          <h3 style={{ marginTop: 0, display: 'flex', justifyContent: 'space-between' }}>
+            🖼️ Mi Galería
+            <button onClick={fetchMyImages} style={{ fontSize: '12px', padding: '2px 8px', cursor: 'pointer' }}>🔄 Actualizar</button>
+          </h3>
+          
+          {galleryLoading ? (
+            <p>Cargando imágenes...</p>
+          ) : myImages.length === 0 ? (
+            <p style={{ color: '#666', fontStyle: 'italic' }}>No tienes imágenes guardadas aún.</p>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '15px' }}>
+              {myImages.map((img) => (
+                <div key={img.id} style={{ background: 'white', padding: '10px', borderRadius: '6px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+                  <a href={img.view_url} target="_blank" rel="noopener noreferrer">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={img.view_url} alt={img.prompt} style={{ width: '100%', aspectRatio: '1/1', objectFit: 'cover', borderRadius: '4px', border: '1px solid #eee' }} />
+                  </a>
+                  <p style={{ fontSize: '11px', margin: '5px 0 0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontWeight: 'bold' }} title={img.prompt}>
+                    {img.prompt}
+                  </p>
+                  <p style={{ fontSize: '10px', color: '#888', margin: '2px 0 0' }}>
+                    {new Date(img.created_at).toLocaleDateString()}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Auth Section */}
+      {(!user || showAuth) && (
+          <div style={{ background: '#f8f9fa', padding: '20px', borderRadius: '8px', marginBottom: '30px', border: '1px solid #e9ecef' }}>
+              <h3 style={{ marginTop: 0 }}>🔐 Autenticación Requerida</h3>
+              <p style={{ fontSize: '14px', color: '#666' }}>Debes iniciar sesión para guardar tus generaciones.</p>
+              
+              <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
+                  <button onClick={() => setAuthMode('signin')} style={{ flex: 1, padding: '8px', borderBottom: authMode === 'signin' ? '2px solid #0070f3' : '1px solid #ddd', background: 'transparent', fontWeight: authMode === 'signin' ? 'bold' : 'normal' }}>Iniciar Sesión</button>
+                  <button onClick={() => setAuthMode('signup')} style={{ flex: 1, padding: '8px', borderBottom: authMode === 'signup' ? '2px solid #0070f3' : '1px solid #ddd', background: 'transparent', fontWeight: authMode === 'signup' ? 'bold' : 'normal' }}>Registrarse</button>
+              </div>
+
+              <form onSubmit={handleAuth}>
+                  {authMode === 'signup' && (
+                      <div style={{ marginBottom: '10px' }}>
+                          <input 
+                            placeholder="Nombre Completo"
+                            value={authForm.fullName}
+                            onChange={e => setAuthForm({...authForm, fullName: e.target.value})}
+                            style={{ width: '100%', padding: '8px', marginBottom: '10px', borderRadius: '4px', border: '1px solid #ccc' }}
+                            required
+                          />
+                      </div>
+                  )}
+                  
+                  {authMode === 'signup' && (
+                      <div style={{ marginBottom: '10px' }}>
+                          <input 
+                            type="email"
+                            placeholder="Email"
+                            value={authForm.email}
+                            onChange={e => setAuthForm({...authForm, email: e.target.value})} 
+                            style={{ width: '100%', padding: '8px', marginBottom: '10px', borderRadius: '4px', border: '1px solid #ccc' }}
+                            required
+                          />
+                      </div>
+                  )}
+
+                  <div style={{ marginBottom: '10px' }}>
+                     {authMode === 'signin' ? (
+                         <input 
+                            placeholder="Usuario o Email"
+                            value={authForm.username} 
+                            onChange={e => setAuthForm({...authForm, username: e.target.value, email: e.target.value})} 
+                            style={{ width: '100%', padding: '8px', marginBottom: '10px', borderRadius: '4px', border: '1px solid #ccc' }}
+                            required
+                          />
+                     ) : (
+                         <input 
+                            placeholder="Nombre de Usuario"
+                            value={authForm.username} 
+                            onChange={e => setAuthForm({...authForm, username: e.target.value})} 
+                            style={{ width: '100%', padding: '8px', marginBottom: '10px', borderRadius: '4px', border: '1px solid #ccc' }}
+                            required
+                          />
+                     )}
+                  </div>
+
+                  <div style={{ marginBottom: '10px' }}>
+                      <input 
+                        type="password"
+                        placeholder="Contraseña"
+                        value={authForm.password}
+                        onChange={e => setAuthForm({...authForm, password: e.target.value})}
+                        style={{ width: '100%', padding: '8px', marginBottom: '10px', borderRadius: '4px', border: '1px solid #ccc' }}
+                        required
+                      />
+                  </div>
+
+                  {authError && <p style={{ color: 'red', fontSize: '13px' }}>{authError}</p>}
+
+                  <button 
+                    type="submit" 
+                    disabled={authLoading}
+                    style={{ width: '100%', padding: '10px', background: '#333', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                  >
+                      {authLoading ? 'Procesando...' : (authMode === 'signin' ? 'Entrar' : 'Registrarme')}
+                  </button>
+              </form>
+          </div>
+      )}
+
+      <div style={{ border: '1px solid #ddd', borderRadius: '6px', padding: '20px', marginBottom: '20px', opacity: !user ? 0.5 : 1, pointerEvents: !user ? 'none' : 'auto' }}>
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: '15px' }}>
           <span style={{ background: '#0070f3', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', marginRight: '10px' }}>POST</span>
           <code style={{ background: '#f5f5f5', padding: '2px 6px', borderRadius: '4px' }}>/api/generate</code>
