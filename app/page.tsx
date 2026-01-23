@@ -5,6 +5,7 @@ import { useState } from 'react';
 interface ApiResult {
   success: boolean;
   message?: string;
+  candidates?: string[];
   view_url?: string;
   image_id?: string;
   [key: string]: unknown;
@@ -17,12 +18,16 @@ export default function Home() {
   const [result, setResult] = useState<ApiResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   
+  // Selection & Saving state
+  const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null);
+  const [saving, setSaving] = useState<boolean>(false);
+  const [saveResult, setSaveResult] = useState<{ view_url: string } | null>(null);
+
   // New states
   const [inputImages, setInputImages] = useState<File[]>([]);
   const [dragActive, setDragActive] = useState<boolean>(false);
+
   const [progress, setProgress] = useState<number>(0);
-
-
 
   // Drag handlers
   const handleDrag = (e: React.DragEvent) => {
@@ -86,21 +91,19 @@ export default function Home() {
     return interval;
   };
 
-
-
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
     setResult(null);
+    setSelectedCandidate(null);
+    setSaveResult(null);
     
     const progressInterval = simulateProgress();
 
     try {
       // Convert images to base64
       const filesBase64 = await Promise.all(inputImages.map(img => toBase64(img)));
-      // Remove data URL prefix logic moved here to ensure we handle the string manipulation correctly
-      // We stripping the header because backend route.ts takes raw base64 and maps to Binary directly
       const cleanBase64 = filesBase64.map(s => {
         const parts = s.split(',');
         return parts.length > 1 ? parts[1] : s;
@@ -133,11 +136,45 @@ export default function Home() {
     } finally {
       clearInterval(progressInterval);
       setLoading(false);
-      // Wait a bit before resetting progress if successful, or leave it at 100
       if (!error) setProgress(100);
       else setProgress(0); 
     }
   };
+
+  const handleSaveImage = async () => {
+      if (selectedCandidate === null || !result?.candidates) return;
+      setSaving(true);
+      
+      try {
+          const filesBase64 = await Promise.all(inputImages.map(img => toBase64(img)));
+
+          const res = await fetch('/api/save-image', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({
+                  prompt,
+                  model,
+                  imageData: result.candidates[selectedCandidate],
+                  input_images: filesBase64 // Send full input images to save context if needed
+              })
+          });
+          
+          const data = await res.json();
+          if (data.success) {
+              setSaveResult({ view_url: data.view_url });
+              // Clear candidates to show only saved result? Or keep them? 
+              // Keep them allows specific user flow, but requirements say "others are discarded".
+              // Visual "Discard" by hiding candidates section could be nice.
+          } else {
+              alert("Error converting/saving: " + data.message);
+          }
+      } catch (e) {
+          alert("Error saving image");
+      } finally {
+          setSaving(false);
+      }
+  };
+
 
   return (
     <main style={{ maxWidth: '800px', margin: '40px auto', padding: '20px', background: 'white', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
@@ -285,19 +322,73 @@ export default function Home() {
 
       {result && (
         <div style={{ background: '#f9fff9', border: '1px solid #ccffcc', padding: '20px', borderRadius: '6px' }}>
-          <h3 style={{ marginTop: 0, color: '#006600' }}>✅ Resultado:</h3>          
+          <h3 style={{ marginTop: 0, color: '#006600' }}>✅ Resultados ({result.candidates?.length} generadas):</h3>          
           
-          {result.view_url && (
+          {/* Candidates Grid */}
+          {result.candidates && !saveResult && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px', marginTop: '15px' }}>
+                  {result.candidates.map((imgSrc, idx) => (
+                      <div 
+                        key={idx}
+                        onClick={() => setSelectedCandidate(idx)}
+                        style={{ 
+                            border: selectedCandidate === idx ? '4px solid #0070f3' : '2px solid transparent',
+                            borderRadius: '8px',
+                            cursor: 'pointer',
+                            overflow: 'hidden',
+                            position: 'relative',
+                            boxShadow: selectedCandidate === idx ? '0 0 10px rgba(0,112,243,0.5)' : 'none'
+                        }}
+                      >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={imgSrc} alt={`Candidate ${idx+1}`} style={{ width: '100%', display: 'block' }} />
+                          {selectedCandidate === idx && (
+                              <div style={{ position: 'absolute', top: 5, right: 5, background: '#0070f3', color: 'white', borderRadius: '50%', width: '24px', height: '24px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>✓</div>
+                          )}
+                      </div>
+                  ))}
+              </div>
+          )}
+
+          {/* Action Area */}
+          {!saveResult && result.candidates && (
+              <div style={{ marginTop: '20px', textAlign: 'center' }}>
+                  <p style={{ color: '#555', fontSize: '14px', fontStyle: 'italic', marginBottom: '10px' }}>
+                      Selecciona tu imagen favorita y guárdala. Las demás serán descartadas.
+                  </p>
+                  <button 
+                    onClick={handleSaveImage}
+                    disabled={selectedCandidate === null || saving}
+                    style={{ 
+                        background: selectedCandidate === null ? '#ccc' : '#28a745',
+                        color: 'white', border: 'none', padding: '12px 24px', borderRadius: '6px',
+                        fontSize: '16px', fontWeight: 'bold', cursor: selectedCandidate === null ? 'not-allowed' : 'pointer'
+                    }}
+                  >
+                      {saving ? 'Guardando...' : '💾 Guardar Imagen Seleccionada'}
+                  </button>
+              </div>
+          )}
+
+          {/* Final Result View */}
+          {saveResult && saveResult.view_url && (
             <div style={{ textAlign: 'center', marginTop: '20px' }}>
-              <p style={{ fontWeight: 'bold', marginBottom: '10px' }}>Vista Previa:</p>
-              <a href={result.view_url} target="_blank" rel="noopener noreferrer">
+              <div style={{ background: '#e6ffe6', padding: '15px', borderRadius: '8px', border: '1px solid #b3ffb3', marginBottom: '15px' }}>
+                  <h4 style={{ margin: '0 0 10px 0', color: '#006600' }}>¡Imagen Guardada con Éxito!</h4>
+                  <p style={{ margin: 0 }}>Las demás opciones han sido descartadas.</p>
+              </div>
+              <p style={{ fontWeight: 'bold', marginBottom: '10px' }}>Vista Previa Final:</p>
+              <a href={saveResult.view_url} target="_blank" rel="noopener noreferrer">
                  {/* eslint-disable-next-line @next/next/no-img-element */}
                  <img 
-                  src={result.view_url} 
-                  alt="Generada" 
+                  src={result.candidates![selectedCandidate!]} // Show local base64 or fetch from new URL if desired, simplified here
+                  alt="Generada Final" 
                   style={{ maxWidth: '100%', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }} 
                 />
               </a>
+              <p style={{ marginTop: '10px' }}>
+                  <a href={saveResult.view_url} target="_blank" style={{ color: '#0070f3' }}>Abrir URL Permanente</a>
+              </p>
             </div>
           )}
         </div>

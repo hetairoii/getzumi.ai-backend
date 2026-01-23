@@ -20,52 +20,29 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, message: "API Key not configured" }, { status: 500 });
     }
 
-    // 1. Generate Image
+    // 1. Generate Images (4 candidates)
     const service = new GeminiImageService(apiKey);
-    const result = await service.generateImageBytes(prompt, model, input_images);
+    const result = await service.generateImages(prompt, model, input_images, 4);
 
-    if (!result.success || !result.data) {
+    if (!result.success || !result.data || result.data.length === 0) {
       return NextResponse.json({ success: false, message: result.error }, { status: 502 });
     }
 
-    // 2. Compress Image using Sharp
-    const compressedBuffer = await sharp(result.data)
-      .jpeg({ quality: 70, mozjpeg: true })
-      .toBuffer();
+    // 2. Compress All Images
+    const compressedImages = await Promise.all(result.data.map(buffer => 
+        sharp(buffer)
+            .jpeg({ quality: 70, mozjpeg: true })
+            .toBuffer()
+    ));
 
-    // 3. Save to MongoDB
-    const client = await clientPromise;
-    const db = client.db(process.env.MONGO_DB_NAME || "zumidb");
-    const collection = db.collection("generated_images");
-
-    // Process input images for storage
-    const storedInputImages = input_images.map(imgStr => {
-      // Remove data URL prefix if present to get clean base64
-      const base64Data = imgStr.replace(/^data:image\/\w+;base64,/, "");
-      return new Binary(Buffer.from(base64Data, 'base64'));
-    });
-
-    const doc = {
-      prompt,
-      model,
-      image_data: new Binary(compressedBuffer),
-      input_images: storedInputImages,
-      content_type: "image/jpeg",
-      created_at: new Date(),
-    };
-
-    const insertResult = await collection.insertOne(doc);
-    const imageId = insertResult.insertedId.toString();
-
-    // Obtener la URL base dinámicamente desde la solicitud (funciona en localhost y en Netlify automáticamente)
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || request.nextUrl.origin;
-    const viewUrl = `${baseUrl}/api/view/${imageId}`;
+    // 3. Return candidates to frontend (Do NOT save to DB yet)
+    // Convert to base64 for client preview
+    const candidates = compressedImages.map(buf => `data:image/jpeg;base64,${buf.toString('base64')}`);
 
     return NextResponse.json({
       success: true,
-      image_id: imageId,
-      message: `Image saved. View at: ${viewUrl}`,
-      view_url: viewUrl
+      candidates: candidates,
+      message: "Generated 4 candidates. Please select one to save."
     });
 
   } catch (error) {

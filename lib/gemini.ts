@@ -1,7 +1,7 @@
 
 interface GenerateImageResult {
   success: boolean;
-  data?: Buffer;
+  data?: Buffer[]; // Changed to Array
   error?: string;
 }
 
@@ -19,12 +19,48 @@ export class GeminiImageService {
     };
   }
 
-  async generateImageBytes(prompt: string, model: string, inputImages: string[] = []): Promise<GenerateImageResult> {
-    // 1. Determine the API Endpoint and Mode
-    // - SeeDream: Uses /v1/images/generations (Standard OpenAI Image API)
-    // - Sora: Uses /v1/chat/completions (Docs confirm: "Uses standard chat completion interface")
-    // - Nano Banana (Gemini): Uses /v1/chat/completions
-    
+  // Helper to process a single response and extract image
+  private async extractImageFromResponse(response: Response, isChatModel: boolean): Promise<Buffer | null> {
+      if (!response.ok) {
+          const t = await response.text();
+          console.error(`API Error: ${response.status} - ${t}`);
+          return null;
+      }
+      
+      const result: any = await response.json();
+
+      if (isChatModel) {
+          const content = result.choices?.[0]?.message?.content;
+          if (!content) return null;
+
+          const base64Pattern = /data:image\/([^;]+);base64,([A-Za-z0-9+/=]+)/;
+          const b64Match = content.match(base64Pattern);
+          if (b64Match) return Buffer.from(b64Match[2], 'base64');
+
+          const urlPattern = /!\[.*?\]\((https?:\/\/[^)]+)\)/;
+          const urlMatch = content.match(urlPattern);
+          if (urlMatch) {
+              const imgReq = await fetch(urlMatch[1]);
+              if (imgReq.ok) return Buffer.from(await imgReq.arrayBuffer());
+          }
+      } else {
+          // Standard Image API
+          // This usually handles 'n' > 1 natively, but if we call this helper per item, we expect result.data[0]
+          // However, for standard API we will handle batch extraction in main method.
+          // This helper is mainly for single-request Chat models.
+          if (result.data && result.data[0]) {
+              const item = result.data[0];
+              if (item.b64_json) return Buffer.from(item.b64_json, 'base64');
+              if (item.url) {
+                  const r = await fetch(item.url);
+                  if (r.ok) return Buffer.from(await r.arrayBuffer());
+              }
+          }
+      }
+      return null;
+  }
+
+  async generateImages(prompt: string, model: string, inputImages: string[] = [], count: number = 4): Promise<GenerateImageResult> {
     let currentApiUrl = "https://api.apiyi.com/v1/chat/completions";
     let isChatModel = true;
 
@@ -33,134 +69,140 @@ export class GeminiImageService {
       isChatModel = false;
     }
 
-    // 2. Construct Payload
-    let payload: any;
+    const buffers: Buffer[] = [];
 
-    if (isChatModel) {
-        // Chat Completion Payload
-        let content: any = prompt;
+    // Strategy:
+    // If Image API (SeeDream), we can try sending 'n': count. 
+    // If Chat API (Nano/Sora), we must process in parallel requests because they generate 1 text usually.
+    
+    if (!isChatModel) {
+        // --- IMAGE API Strategy ---
+        // FIX: Seedream seems to ignore 'n' parameter or fail with it on this provider. 
+        // We force parallel execution for Seedream as well.
+        if (model.includes('seedream')) {
+             const payload = {
+                model: model,
+                prompt: prompt,
+                n: 1, // Force single per request
+                size: model.includes('seedream-4') ? "2048x2048" : "1024x1024",
+                response_format: "b64_json",
+                watermark: false
+            };
 
-        // Support Multimodal Input (Text + Images)
-        // Nano Banana supports this. Sora docs don't explicitly show input images, but strict Chat API usually handles it.
-        if (inputImages && inputImages.length > 0) {
-          content = [
-            { type: "text", text: prompt },
-            ...inputImages.map(img => ({
-              type: "image_url",
-              image_url: {
-                // Ensure data URI format
-                url: img.startsWith('data:') ? img : `data:image/jpeg;base64,${img}`
-              }
-            }))
-          ];
+            const promises = Array(count).fill(0).map(() => 
+                fetch(currentApiUrl, {
+                    method: "POST", 
+                    headers: this.headers, 
+                    body: JSON.stringify(payload)
+                }).then(async res => {
+                    if (!res.ok) {
+                        console.error("Seedream Parallel Error:", await res.text());
+                        return null;
+                    }
+                    const json = await res.json();
+                    if (json.data && json.data[0]) {
+                        if (json.data[0].b64_json) return Buffer.from(json.data[0].b64_json, 'base64');
+                        if (json.data[0].url) {
+                            const r = await fetch(json.data[0].url);
+                            return r.ok ? Buffer.from(await r.arrayBuffer()) : null;
+                        }
+                    }
+                    return null;
+                })
+            );
+
+            try {
+                console.log(`[GeminiService] Launching ${count} parallel requests to ${model} (Image API)...`);
+                const results = await Promise.all(promises);
+                results.forEach(buf => { if (buf) buffers.push(buf); });
+            } catch (e) {
+                 console.error("Parallel Seedream Gen Error", e);
+                 return { success: false, error: String(e) };
+            }
+
+        } else {
+            // Standard Image API (DALL-E etc) - Attempt native batching
+            const payload = {
+                model: model,
+                prompt: prompt,
+                n: count,
+                size: "1024x1024",
+                response_format: "b64_json",
+                watermark: false
+            };
+
+            try {
+                console.log(`[GeminiService] Generating ${count} images with ${model}...`);
+                const response = await fetch(currentApiUrl, {
+                    method: "POST",
+                    headers: this.headers,
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) throw new Error(await response.text());
+                
+                const result: any = await response.json();
+                
+                if (result.data && Array.isArray(result.data)) {
+                    for (const item of result.data) {
+                        if (item.b64_json) buffers.push(Buffer.from(item.b64_json, 'base64'));
+                        else if (item.url) {
+                            const r = await fetch(item.url);
+                            if (r.ok) buffers.push(Buffer.from(await r.arrayBuffer()));
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error("Image Gen Error", e);
+                return { success: false, error: String(e) };
+            }
         }
 
-        payload = {
-          model: model,
-          stream: false,
-          messages: [{ role: "user", content }],
-        };
     } else {
-        // Image Generation Payload (SeeDream)
-        payload = {
+        // --- CHAT API Strategy (Parallel Requests) ---
+        // Construct single payload template
+        let content: any = prompt;
+        if (inputImages && inputImages.length > 0) {
+            content = [
+                { type: "text", text: prompt },
+                ...inputImages.map(img => ({
+                    type: "image_url",
+                    image_url: { url: img.startsWith('data:') ? img : `data:image/jpeg;base64,${img}` }
+                }))
+            ];
+        }
+
+        const payload = {
             model: model,
-            prompt: prompt,
-            n: 1,
-            size: "1024x1024", // Default safe size
-            response_format: "b64_json",
-            watermark: false // Solicitar sin marca de agua
+            stream: false,
+            messages: [{ role: "user", content }],
         };
-        // Note: seedream docs show input "size" can be "2K", "4K", or "2048x2048". "1024x1024" should work or be close to 1K.
-        if (model.includes('seedream-4-5') || model.includes('seedream-4-0')) {
-             // Use 2K as default for SeeDream high quality, or let user specify? 
-             // Start safe with 1024x1024 unless we want to maximize quality. Docs say "Default: 2048x2048".
-             // Let's stick to standard 1024 to save latency/bandwidth unless requested.
-             payload.size = "2048x2048"; 
+
+        // Create Array of Promises
+        const promises = Array(count).fill(0).map(() => 
+            fetch(currentApiUrl, {
+                method: "POST", 
+                headers: this.headers, 
+                body: JSON.stringify(payload)
+            }).then(res => this.extractImageFromResponse(res, true))
+        );
+
+        try {
+            console.log(`[GeminiService] Launching ${count} parallel requests to ${model}...`);
+            const results = await Promise.all(promises);
+            results.forEach(buf => { if (buf) buffers.push(buf); });
+        } catch (e) {
+             console.error("Parallel Gen Error", e);
+             return { success: false, error: String(e) };
         }
     }
 
-    try {
-      console.log(`[GeminiService] Generating with ${model} at ${currentApiUrl}`);
-      
-      // Use standard fetch here
-      const response = await fetch(currentApiUrl, {
-        method: "POST",
-        headers: this.headers,
-        body: JSON.stringify(payload),
-      });
+    if (buffers.length === 0) return { success: false, error: "No images generated successfully" };
+    return { success: true, data: buffers };
+  }
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        return { success: false, error: `API error: ${response.status} - ${errorText}` };
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result: any = await response.json();
-      let imageBuffer: Buffer | undefined;
-
-      // 3. Parse Response based on Mode
-      if (isChatModel) {
-          // Expecting Base64 inside Chat Content (Nano Banana / Sora)
-          // Sora docs: "content = result['choices'][0]['message']['content'] ... image_urls = re.findall..."
-          // Wait, Sora docs say it returns **URLs** in the markdown content!
-          // Nano Banana docs say it returns **Base64** in the content (via regex detection).
-          // We need to handle BOTH patterns (Base64 data URI OR Markdown Image URL).
-
-          const content = result.choices?.[0]?.message?.content;
-          if (!content) return { success: false, error: "Empty content from API" };
-
-          // Pattern 1: Base64 Data URI (Nano Banana)
-          const base64Pattern = /data:image\/([^;]+);base64,([A-Za-z0-9+/=]+)/;
-          const b64Match = content.match(base64Pattern);
-
-          if (b64Match) {
-             imageBuffer = Buffer.from(b64Match[2], 'base64');
-          } else {
-             // Pattern 2: Markdown Image URL (Sora) -> ![image](https://...)
-             const urlPattern = /!\[.*?\]\((https?:\/\/[^)]+)\)/;
-             const urlMatch = content.match(urlPattern);
-             
-             if (urlMatch) {
-                 const imgUrl = urlMatch[1];
-                 console.log(`[GeminiService] Found Image URL in Chat: ${imgUrl}`);
-                 // Fetch the image to store bytes
-                 const imgReq = await fetch(imgUrl);
-                 if (!imgReq.ok) return { success: false, error: "Failed to download image from URL" };
-                 const arrayBuffer = await imgReq.arrayBuffer();
-                 imageBuffer = Buffer.from(arrayBuffer);
-             } else {
-                 return { success: false, error: "No image (Base64 or URL) found in response content" };
-             }
-          }
-      } else {
-          // Standard Image Generation Response (SeeDream)
-          // { data: [ { b64_json: "..." } ] } or { data: [ { url: "..." } ] }
-          if (result.data && result.data.length > 0) {
-              const item = result.data[0];
-              if (item.b64_json) {
-                  imageBuffer = Buffer.from(item.b64_json, 'base64');
-              } else if (item.url) {
-                   const imgReq = await fetch(item.url);
-                   if (!imgReq.ok) return { success: false, error: "Failed to download image from URL" };
-                   const arrayBuffer = await imgReq.arrayBuffer();
-                   imageBuffer = Buffer.from(arrayBuffer);
-              } else {
-                  return { success: false, error: "No image data found in standard response" };
-              }
-          } else {
-              return { success: false, error: "Empty data array in standard response" };
-          }
-      }
-      
-      if (!imageBuffer) return { success: false, error: "Failed to process image buffer" };
-      return { success: true, data: imageBuffer };
-
-    } catch (error) {
-       let errorMessage = "Unknown error";
-       if (error instanceof Error) {
-           errorMessage = error.message;
-       }
-      return { success: false, error: errorMessage };
-    }
+  // Deprecated shim
+  async generateImageBytes(prompt: string, model: string, inputImages: string[] = []): Promise<GenerateImageResult> {
+      return this.generateImages(prompt, model, inputImages, 1);
   }
 }
