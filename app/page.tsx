@@ -434,7 +434,10 @@ export default function Home() {
             })
         });
 
-        if (!res.ok) throw new Error("Error starting video generation");
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            throw new Error(errData.message || "Error starting video generation");
+        }
         if (!res.body) throw new Error("No response body");
 
         const reader = res.body.getReader();
@@ -1003,6 +1006,7 @@ export default function Home() {
                 <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>Modelo:</label>
                 <select value={videoModel} onChange={(e)=>setVideoModel(e.target.value)} style={{ width: '100%', padding: '10px', borderRadius: '4px', background: 'white', border: '1px solid #ccc' }}>
                     <option value="sora_video2">Sora Video 2 (Default)</option>
+                    <option value="sora-2-pro">Sora 2 Pro (HD)</option>
                     <option value="sora_video2-landscape">Sora Video 2 (Landscape)</option>
                     <option value="sora_video2-15s">Sora Video 2 (15s)</option>
                     <option value="sora_video2-landscape-15s">Sora Video 2 (Landscape 15s)</option>

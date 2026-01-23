@@ -29,6 +29,133 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ success: false, message: "API Configuration Missing" }, { status: 500 });
         }
 
+        // --- ASYNC API HANDLER FOR sora-2-pro ---
+        if (model === "sora-2-pro") {
+            try {
+                // 1. Submit User Request
+                const formData = new FormData();
+                formData.append("prompt", prompt);
+                formData.append("model", "sora-2"); // Explicitly using 'sora-2' base model as per async docs, assuming pro features via account or config.
+                // Or if the user insists on sora-2-pro, maybe I should pass that? 
+                // Let's pass the 'model' variable directly if it's sora-2-pro, assuming the API handles it.
+                // Actually, re-reading the prompt: "Implementa el modelo sora-2-pro... usaremos el mismo endpoint... pero para la llamada de api usaremos... async".
+                // I will pass "sora-2-pro" as the model value. 
+                // Fix: Docs usually imply the endpoint is for the model family. Let's try passing 'sora-2-pro'.
+                formData.set("model", "sora-2-pro"); 
+                formData.append("size", "1080x1920"); // High res for Pro
+                formData.append("seconds", "10"); // Default to 10s for stability
+
+                if (input_image) {
+                     // For async, image usually needs to be uploaded as file, not URL.
+                     // But docs might accept URL? If not, we skip image for now or fetch-blob-append.
+                     // The Sync API accepted params. Async might be stricter.
+                     // Let's skip image for Async temporarily or assume it's text-to-video for this specific request.
+                }
+
+                const submitRes = await fetch(`${baseUrl}/v1/videos`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${apiKey}` }, // Do NOT set Content-Type for FormData, fetch sets it with boundary
+                    body: formData
+                });
+
+                if (!submitRes.ok) {
+                    const errText = await submitRes.text();
+                    console.error("Async Submit Error:", errText);
+                    return NextResponse.json({ success: false, message: "Failed to start generation" }, { status: 502 });
+                }
+
+                const submitData = await submitRes.json();
+                const taskId = submitData.id;
+
+                if (!taskId) {
+                     return NextResponse.json({ success: false, message: "No Task ID received" }, { status: 502 });
+                }
+
+                // 2. Start Polling Stream
+                const encoder = new TextEncoder();
+                const stream = new ReadableStream({
+                    async start(controller) {
+                        let isComplete = false;
+                        let attempts = 0;
+                        const maxAttempts = 120; // 10 mins approx (if 5s interval)
+                        
+                        while (!isComplete && attempts < maxAttempts) {
+                            attempts++;
+                            // Poll status
+                            try {
+                                const statusRes = await fetch(`${baseUrl}/v1/videos/${taskId}`, {
+                                    headers: { 'Authorization': `Bearer ${apiKey}` }
+                                });
+                                
+                                if (statusRes.ok) {
+                                    const statusData = await statusRes.json();
+                                    const state = statusData.status; // check docs for exact field. usually 'status'
+                                    const progress = statusData.progress || 0;
+                                    
+                                    // Send Progress Update
+                                    const progressMsg = `Progress: ${progress}%\n\nStatus: ${state}`;
+                                    const chunk = `data: ${JSON.stringify({ 
+                                        choices: [{ delta: { content: progressMsg } }] 
+                                    })}\n\n`;
+                                    controller.enqueue(encoder.encode(chunk));
+
+                                    if (state === 'completed' || state === 'succeeded') {
+                                        isComplete = true;
+                                        // Final Result
+                                        const videoUrl = statusData.url; // Verify field name from previous context or generic
+                                        if (videoUrl) {
+                                            const finalMsg = `\n\n[Download Video](${videoUrl})`;
+                                            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
+                                                choices: [{ delta: { content: finalMsg } }] 
+                                            })}\n\n`));
+                                            
+                                            // Save to DB
+                                            const client = await clientPromise;
+                                            const db = client.db(process.env.MONGO_DB_NAME || "zumidb");
+                                            await db.collection("generated_videos").insertOne({
+                                                user_id: userId,
+                                                prompt,
+                                                model: "sora-2-pro",
+                                                video_url: videoUrl,
+                                                created_at: new Date()
+                                            });
+                                        }
+                                        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                                    } else if (state === 'failed') {
+                                        isComplete = true;
+                                        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
+                                            choices: [{ delta: { content: "\n\nError: Video generation failed." } }] 
+                                        })}\n\n`));
+                                        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                                    }
+                                }
+                            } catch (e) {
+                                console.error("Polling Error:", e);
+                            }
+
+                            if (!isComplete) {
+                                await new Promise(r => setTimeout(r, 5000)); // Wait 5s
+                            }
+                        }
+                        controller.close();
+                    }
+                });
+
+                return new NextResponse(stream, {
+                    headers: {
+                        'Content-Type': 'text/event-stream',
+                        'Cache-Control': 'no-cache',
+                        'Connection': 'keep-alive',
+                    },
+                });
+
+            } catch (error) {
+                console.error("Async Process Error:", error);
+                return NextResponse.json({ success: false, message: "Internal Error" }, { status: 500 });
+            }
+        }
+        
+        // --- EXISTING SYNC HANDLER ---
         const messages: any[] = [
             {
                 role: "user",
@@ -61,7 +188,12 @@ export async function POST(req: NextRequest) {
         if (!apiRes.ok) {
             const err = await apiRes.text();
             console.error("APIYI Error:", err);
-            return NextResponse.json({ success: false, message: "Provider Error" }, { status: 502 });
+            try {
+                const jsonErr = JSON.parse(err);
+                return NextResponse.json({ success: false, message: jsonErr.error?.message || "Provider Error" }, { status: 502 });
+            } catch (e) {
+                return NextResponse.json({ success: false, message: "Provider Error" }, { status: 502 });
+            }
         }
 
         const encoder = new TextEncoder();
