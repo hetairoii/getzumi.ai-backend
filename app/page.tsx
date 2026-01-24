@@ -34,6 +34,9 @@ export default function Home() {
   const [videoProgress, setVideoProgress] = useState<string>(''); // For text updates like "> Progress: 36%"
   const [videoPercent, setVideoPercent] = useState<number>(0); // Numeric progress
   const [videoResult, setVideoResult] = useState<{ video_url: string } | null>(null);
+  const [videoDuration, setVideoDuration] = useState<number>(10);
+  const [videoImages, setVideoImages] = useState<File[]>([]);
+  const [videoDragActive, setVideoDragActive] = useState<boolean>(false);
 
   // Image State
   const [prompt, setPrompt] = useState<string>('');
@@ -220,6 +223,46 @@ export default function Home() {
     }, 500);
     return interval;
   };
+
+  const handleVideoDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setVideoDragActive(true);
+    } else if (e.type === "dragleave") {
+      setVideoDragActive(false);
+    }
+  };
+
+  const handleVideoDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setVideoDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      addVideoFiles(Array.from(e.dataTransfer.files));
+    }
+  };
+
+  const handleVideoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    if (e.target.files && e.target.files[0]) {
+      addVideoFiles(Array.from(e.target.files));
+    }
+  };
+
+  const addVideoFiles = (files: File[]) => {
+      const validFiles = files.filter(f => f.type.startsWith('image/'));
+      if (validFiles.length + videoImages.length > 2) {
+          alert("Máximo 2 imágenes permitidas para video (Inicio / Fin)");
+          return;
+      }
+      setVideoImages(prev => [...prev, ...validFiles].slice(0, 2));
+  };
+
+  const removeVideoImage = (index: number) => {
+    setVideoImages(prev => prev.filter((_, i) => i !== index));
+  };
+
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -425,12 +468,24 @@ export default function Home() {
     setError(null);
 
     try {
+        // Prepare images if any
+        let input_images: string[] = [];
+        if (videoImages.length > 0) {
+            const filesBase64 = await Promise.all(videoImages.map(img => toBase64(img)));
+            input_images = filesBase64.map(s => {
+                const parts = s.split(',');
+                return parts.length > 1 ? parts[1] : s;
+            });
+        }
+
         const res = await fetch('/api/video/generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 prompt: videoPrompt,
-                model: videoModel
+                model: videoModel,
+                input_images,
+                seconds: videoDuration
             })
         });
 
@@ -1005,12 +1060,24 @@ export default function Home() {
             <div style={{ marginBottom: '15px' }}>
                 <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>Modelo:</label>
                 <select value={videoModel} onChange={(e)=>setVideoModel(e.target.value)} style={{ width: '100%', padding: '10px', borderRadius: '4px', background: 'white', border: '1px solid #ccc' }}>
-                    <option value="sora_video2">Sora Video 2 (Default)</option>
-                    <option value="sora-2-pro">Sora 2 Pro (HD)</option>
-                    <option value="sora_video2-landscape">Sora Video 2 (Landscape)</option>
-                    <option value="sora_video2-15s">Sora Video 2 (15s)</option>
-                    <option value="sora_video2-landscape-15s">Sora Video 2 (Landscape 15s)</option>
+                    <optgroup label="Sora (Async - Recomendado)">
+                        <option value="sora-2">Sora 2 (Estándar - Async)</option>
+                        <option value="sora-2-pro">Sora 2 Pro (HD 1080p - Lento)</option>
+                    </optgroup>
+                    <optgroup label="Sora (Sync - Rápido/Legacy)">
+                        <option value="sora_video2">Sora Video 2 (Vertical Sync)</option>
+                        <option value="sora_video2-landscape">Sora Video 2 (Landscape Sync)</option>
+                    </optgroup>
+                    <optgroup label="Veo (Google - Async)">
+                        <option value="veo-3.1">Veo 3.1 (Retrato)</option>
+                        <option value="veo-3.1-landscape">Veo 3.1 (Landscape)</option>
+                        <option value="veo-3.1-fast">Veo 3.1 Fast (Rápido)</option>
+                        <option value="veo-3.1-landscape-fast">Veo 3.1 Landscape Fast</option>
+                    </optgroup>
                 </select>
+                <p style={{ fontSize: '11px', color: '#666', marginTop: '5px' }}>
+                  {videoModel.includes('sora-2-pro') ? '⚠️ Sora 2 Pro puede tardar hasta 10 min.' : videoModel.startsWith('veo') ? 'ℹ️ Veo soporta Start/End Frames (2 imágenes).' : 'ℹ️ Modelos Sync son rápidos pero menos estables.'}
+                </p>
             </div>
             
             <div style={{ marginBottom: '15px' }}>
@@ -1022,6 +1089,106 @@ export default function Home() {
                     style={{ width: '100%', padding: '10px', borderRadius: '4px', border: '1px solid #ccc', minHeight: '80px', fontFamily: 'inherit' }}
                     required
                 />
+            </div>
+
+            {/* Duration Slider - Only for Sora Async Models */}
+            {(videoModel === 'sora-2' || videoModel === 'sora-2-pro') && (
+            <div style={{ marginBottom: '15px' }}>
+                <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
+                    Duración: {videoDuration} segundos
+                    {videoDuration > 15 && <span style={{ color: 'orange', marginLeft: '10px', fontSize: '12px' }}>(Experimental)</span>}
+                </label>
+                <input 
+                  type="range" 
+                  min="5" 
+                  max={videoModel === 'sora-2-pro' ? "60" : "15"} // Limit regular Sora to 15s? Or allow it? Docs say 15. Pro might allow more.
+                  step="5"
+                  value={videoDuration}
+                  onChange={(e) => setVideoDuration(parseInt(e.target.value))}
+                  style={{ width: '100%' }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#666' }}>
+                    <span>5s</span>
+                    <span>15s (Std)</span>
+                    {videoModel === 'sora-2-pro' && <span>60s (Pro?)</span>}
+                </div>
+                <p style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>
+                   * La documentación oficial lista 10s y 15s. Valores más altos pueden no ser respetados por todos los modelos.
+                </p>
+            </div>
+            )}
+            
+            {/* Veo Duration Note */}
+            {videoModel.startsWith('veo') && (
+                 <div style={{ marginBottom: '15px' }}>
+                     <label style={{ display: 'block', fontWeight: 'bold', fontSize: '14px', color: '#999' }}>Duración: Automática</label>
+                     <p style={{ fontSize: '11px', color: '#888' }}>El modelo Veo determina la duración óptima basada en el prompt y las imágenes.</p>
+                 </div>
+            )}
+
+
+            <div style={{ marginBottom: '15px' }}>
+                 <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>Imágenes de Referencia (Opcional - Imagen a Video):</label>
+                 <div 
+                   onDragEnter={handleVideoDrag} 
+                   onDragLeave={handleVideoDrag} 
+                   onDragOver={handleVideoDrag} 
+                   onDrop={handleVideoDrop}
+                   style={{ 
+                     border: `2px dashed ${videoDragActive ? '#0070f3' : '#ccc'}`,
+                     borderRadius: '6px',
+                     padding: '20px',
+                     textAlign: 'center',
+                     background: videoDragActive ? '#f0f8ff' : '#fafafa',
+                     transition: 'all 0.2s',
+                     cursor: 'pointer'
+                   }}
+                 >
+                   <input 
+                     type="file" 
+                     id="video-file-upload" 
+                     multiple 
+                     accept="image/*" 
+                     onChange={handleVideoFileChange} 
+                     style={{ display: 'none' }} 
+                   />
+                   <label htmlFor="video-file-upload" style={{ cursor: 'pointer', display: 'block' }}>
+                     <p style={{ margin: 0, fontWeight: 'bold', color: '#555' }}>
+                       Arrastra 1 o 2 imágenes (Inicio / Fin)
+                     </p>
+                    <span style={{ fontSize: '12px', color: '#888' }}>
+                        (Veo: soporta Inicio y Fin. Sora: Solo Referencia inicial)
+                    </span>
+                   </label>
+
+                   {videoImages.length > 0 && (
+                     <div style={{ display: 'flex', gap: '10px', marginTop: '15px', justifyContent: 'center', flexWrap: 'wrap' }}>
+                       {videoImages.map((file, idx) => (
+                         <div key={idx} style={{ position: 'relative', width: '80px', height: '80px' }}>
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                           <img 
+                             src={URL.createObjectURL(file)} 
+                             alt="preview" 
+                             style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '4px', border: '1px solid #ddd' }} 
+                           />
+                           <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: 'rgba(0,0,0,0.6)', color: 'white', fontSize: '9px', textAlign: 'center' }}>
+                             {idx === 0 ? 'Inicio' : 'Fin'}
+                           </div>
+                           <button
+                             type="button"
+                             onClick={(e) => { e.preventDefault(); removeVideoImage(idx); }}
+                             style={{
+                               position: 'absolute', top: -5, right: -5, background: 'red', color: 'white',
+                               border: 'none', borderRadius: '50%', width: '20px', height: '20px', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center'
+                             }}
+                           >
+                             x
+                           </button>
+                         </div>
+                       ))}
+                     </div>
+                   )}
+                 </div>
             </div>
 
             <button 
@@ -1054,12 +1221,12 @@ export default function Home() {
                 }} />
               </div>
               <p style={{ textAlign: 'center', fontSize: '12px', margin: '5px 0 0', color: '#666' }}>
-                Generando (Sora): {videoPercent.toFixed(1)}%
+                Generando ({videoModel}): {videoPercent.toFixed(1)}%
               </p>
               <p style={{ textAlign: 'center', fontSize: '11px', color: '#999', marginTop: '2px' }}>
-                 Tiempo Estimado: {videoModel === 'sora-2-pro' ? '3 a 5 minutos (Alta Calidad)' : '30 a 60 segundos'}
+                 Tiempo Estimado: {videoModel.includes('pro') ? '5-10 minutos' : '1-3 minutos'}
+                 {videoModel.startsWith('veo') && ' (Veo es más rápido con modelos fast)'}
               </p>
-              {/* Optional: detail logs toggle? For now we hide raw logs as requested */}
             </div>
           )}
 

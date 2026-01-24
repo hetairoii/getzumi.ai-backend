@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ success: false, message: "Invalid session" }, { status: 401 });
         }
 
-        const { prompt, model, input_image } = await req.json();
+        const { prompt, model, input_image, input_images, seconds } = await req.json();
 
         if (!prompt) {
             return NextResponse.json({ success: false, message: "Prompt is required" }, { status: 400 });
@@ -29,59 +29,103 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ success: false, message: "API Configuration Missing" }, { status: 500 });
         }
 
-        // --- ASYNC API HANDLER FOR sora-2-pro ---
-        if (model === "sora-2-pro") {
+        // --- ASYNC API HANDLER (Sora 2 Pro, Sora 2 Async, Veo) ---
+        // Docs: https://docs.laozhang.ai/en/api-capabilities/sora2/async-api
+        // Docs: https://docs.laozhang.ai/en/api-capabilities/veo/veo-31-async-api
+        if (model === "sora-2-pro" || model === "sora-2" || model.startsWith("veo-")) {
             try {
-                // 1. Submit User Request
+                // 1. Prepare FormData for Async API
                 const formData = new FormData();
                 formData.append("prompt", prompt);
-                formData.append("model", "sora-2"); // Explicitly using 'sora-2' base model as per async docs, assuming pro features via account or config.
-                // Or if the user insists on sora-2-pro, maybe I should pass that? 
-                // Let's pass the 'model' variable directly if it's sora-2-pro, assuming the API handles it.
-                // Actually, re-reading the prompt: "Implementa el modelo sora-2-pro... usaremos el mismo endpoint... pero para la llamada de api usaremos... async".
-                // I will pass "sora-2-pro" as the model value. 
-                // Fix: Docs usually imply the endpoint is for the model family. Let's try passing 'sora-2-pro'.
-                formData.set("model", "sora-2-pro"); 
-                formData.append("size", "1080x1920"); // High res for Pro
-                formData.append("seconds", "10"); // Default to 10s for stability
+                formData.append("model", model);
 
-                if (input_image) {
-                     // For async, image usually needs to be uploaded as file, not URL.
-                     // But docs might accept URL? If not, we skip image for now or fetch-blob-append.
-                     // The Sync API accepted params. Async might be stricter.
-                     // Let's skip image for Async temporarily or assume it's text-to-video for this specific request.
+                // --- SORA SPECIFIC ---
+                if (model.startsWith("sora-")) {
+                    // Sora supports 'seconds' and 'size'
+                    // Default to 1080x1920 for Pro if not specified, or just let API default? 
+                    // Docs: size="1280x720", "720x1280".
+                    // We will default to landscape 1280x720 if not provided, or respect user intent if we had a param.
+                    formData.append("size", "1280x720"); 
+                    
+                    // Duration: "10", "15". 
+                    // If user requests more, we pass it, but standard is 10/15.
+                    if (seconds) {
+                        formData.append("seconds", seconds.toString());
+                    } else {
+                        formData.append("seconds", "15");
+                    }
                 }
 
+                // --- VEO SPECIFIC ---
+                if (model.startsWith("veo-")) {
+                    // Veo Docs DO NOT list 'seconds' or 'size' as params in the standard Async API table.
+                    // We DO NOT append 'seconds' here to avoid 400 Bad Request.
+                    // Veo models handle resolution via model name suffixes (e.g. -landscape).
+                    
+                    // Handle Image-to-Video Model Switching for Veo
+                    const hasImages = (input_images && input_images.length > 0) || !!input_image;
+                    if (hasImages && !model.includes("-fl")) {
+                        // Switch to frame-loop (-fl) model if images provided but base model selected
+                        // Example: veo-3.1-landscape -> veo-3.1-landscape-fl
+                        // Example: veo-3.1 -> veo-3.1-fl
+                        let newModel = model;
+                         if (model.includes("-fast")) {
+                            newModel = model.replace("-fast", "-fast-fl");
+                        } else {
+                            newModel = model + "-fl";
+                        }
+                        // Fix double suffix or invalid combos if needed (simple append works for standard names)
+                        formData.set("model", newModel);
+                    }
+                }
+
+                // --- IMAGE HANDLING (Common for Async) ---
+                const imagesToProcess = input_images && input_images.length > 0 ? input_images : (input_image ? [input_image] : []);
+                
+                if (imagesToProcess.length > 0) {
+                    for (let i = 0; i < imagesToProcess.length; i++) {
+                        const b64 = imagesToProcess[i];
+                        // Remove header if present (data:image/jpeg;base64,...)
+                        const base64Data = b64.replace(/^data:image\/\w+;base64,/, "");
+                        const buffer = Buffer.from(base64Data, 'base64');
+                        const blob = new Blob([buffer], { type: 'image/jpeg' }); 
+                        
+                        // Parameter name is 'input_reference' for both Sora and Veo
+                        formData.append("input_reference", blob, `ref_image_${i}.jpg`);
+                    }
+                }
+
+                // 2. Submit Task
+                console.log(`[Async] Submitting task for ${model}...`);
                 const submitRes = await fetch(`${baseUrl}/v1/videos`, {
                     method: 'POST',
-                    headers: { 'Authorization': `Bearer ${apiKey}` }, // Do NOT set Content-Type for FormData, fetch sets it with boundary
+                    headers: { 
+                        'Authorization': `Bearer ${apiKey}`
+                        // Content-Type header is set automatically with boundary by FormData
+                    },
                     body: formData
                 });
 
                 if (!submitRes.ok) {
                     const errText = await submitRes.text();
                     console.error("Async Submit Error:", errText);
-                    return NextResponse.json({ success: false, message: "Failed to start generation" }, { status: 502 });
+                    return NextResponse.json({ success: false, message: "Provider Error: " + errText }, { status: 502 });
                 }
 
                 const submitData = await submitRes.json();
                 const taskId = submitData.id;
+                console.log(`[Async] Task created: ${taskId}`);
 
-                if (!taskId) {
-                     return NextResponse.json({ success: false, message: "No Task ID received" }, { status: 502 });
-                }
-
-                // 2. Start Polling Stream
+                // 3. Polling Logic (Stream)
                 const encoder = new TextEncoder();
                 const stream = new ReadableStream({
                     async start(controller) {
                         let isComplete = false;
                         let attempts = 0;
-                        const maxAttempts = 120; // 10 mins approx (if 5s interval)
+                        const maxAttempts = 300; // ~25 mins (5s interval) - Sora Pro can take 10+ mins
                         
                         while (!isComplete && attempts < maxAttempts) {
                             attempts++;
-                            // Poll status
                             try {
                                 const statusRes = await fetch(`${baseUrl}/v1/videos/${taskId}`, {
                                     headers: { 'Authorization': `Bearer ${apiKey}` }
@@ -89,33 +133,45 @@ export async function POST(req: NextRequest) {
                                 
                                 if (statusRes.ok) {
                                     const statusData = await statusRes.json();
-                                    const state = statusData.status; // check docs for exact field. usually 'status'
-                                    const progress = statusData.progress || 0;
+                                    const state = statusData.status; 
+                                    const progress = statusData.progress || (state === 'completed' ? 100 : 0);
                                     
-                                    // Send Progress Update
-                                    const progressMsg = `Progress: ${progress}%\n\nStatus: ${state}`;
-                                    const chunk = `data: ${JSON.stringify({ 
-                                        choices: [{ delta: { content: progressMsg } }] 
-                                    })}\n\n`;
-                                    controller.enqueue(encoder.encode(chunk));
+                                    // Helper to send SSE
+                                    const sendChunk = (text: string) => {
+                                        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
+                                            choices: [{ delta: { content: text } }] 
+                                        })}\n\n`));
+                                    };
 
-                                    if (state === 'completed' || state === 'succeeded') {
+                                    if (state !== 'completed' && state !== 'failed') {
+                                        sendChunk(`Status: ${state} (Progress: ${progress}%)\n`);
+                                    }
+
+                                    if (state === 'completed') {
                                         isComplete = true;
-                                        // Final Result
-                                        const videoUrl = statusData.url; // Verify field name from previous context or generic
+                                        let videoUrl = statusData.url; 
+                                        
+                                        // If url missing in status, fetch /content
+                                        if (!videoUrl) {
+                                             const contentRes = await fetch(`${baseUrl}/v1/videos/${taskId}/content`, {
+                                                 headers: { 'Authorization': `Bearer ${apiKey}` }
+                                             });
+                                             if (contentRes.ok) {
+                                                 const contentData = await contentRes.json();
+                                                 videoUrl = contentData.url;
+                                             }
+                                        }
+
                                         if (videoUrl) {
-                                            const finalMsg = `\n\n[Download Video](${videoUrl})`;
-                                            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
-                                                choices: [{ delta: { content: finalMsg } }] 
-                                            })}\n\n`));
+                                            sendChunk(`\n\nDONE: [Download Video](${videoUrl})`);
                                             
-                                            // Save to DB
+                                            // Save to MongoDB
                                             const client = await clientPromise;
                                             const db = client.db(process.env.MONGO_DB_NAME || "zumidb");
                                             await db.collection("generated_videos").insertOne({
                                                 user_id: userId,
                                                 prompt,
-                                                model: "sora-2-pro",
+                                                model,
                                                 video_url: videoUrl,
                                                 created_at: new Date()
                                             });
@@ -123,9 +179,8 @@ export async function POST(req: NextRequest) {
                                         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
                                     } else if (state === 'failed') {
                                         isComplete = true;
-                                        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
-                                            choices: [{ delta: { content: "\n\nError: Video generation failed." } }] 
-                                        })}\n\n`));
+                                        const errorMsg = statusData.error?.message || "Unknown error";
+                                        sendChunk(`\n\nError: Generation failed - ${errorMsg}`);
                                         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
                                     }
                                 }
@@ -134,8 +189,15 @@ export async function POST(req: NextRequest) {
                             }
 
                             if (!isComplete) {
-                                await new Promise(r => setTimeout(r, 5000)); // Wait 5s
+                                await new Promise(r => setTimeout(r, 5000));
                             }
+                        }
+                        
+                        if (!isComplete) {
+                             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
+                                choices: [{ delta: { content: "\n\nTimeout: Generation took too long." } }] 
+                            })}\n\n`));
+                            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
                         }
                         controller.close();
                     }
@@ -151,7 +213,7 @@ export async function POST(req: NextRequest) {
 
             } catch (error) {
                 console.error("Async Process Error:", error);
-                return NextResponse.json({ success: false, message: "Internal Error" }, { status: 500 });
+                return NextResponse.json({ success: false, message: "Internal Server Error" }, { status: 500 });
             }
         }
         
