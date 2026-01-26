@@ -455,8 +455,8 @@ const swaggerSpec = swaggerJsdoc(options);
   },
   '/api/video/generate': {
     post: {
-      summary: 'Generate Video (Sora)',
-      description: 'Generates a video from text prompt using Sora v2 models via APIYI. Returns a Server-Sent Events (SSE) stream.',
+      summary: 'Generate Video (Sora / Veo)',
+      description: 'Generates a video from text prompt using Sora or Veo models via APIYI. Supports long video generation (>15s) for Veo via recursive loop. Returns a Server-Sent Events (SSE) stream.',
       tags: ['Video'],
       parameters: [
           { in: 'cookie', name: 'auth_token', schema: { type: 'string' }, required: true, description: 'JWT Session Token' }
@@ -470,8 +470,29 @@ const swaggerSpec = swaggerJsdoc(options);
               required: ['prompt'],
               properties: {
                 prompt: { type: 'string', example: 'A cinematic drone shot of a futuristic city at sunset' },
-                model: { type: 'string', enum: ['sora_video2', 'sora-2-pro', 'sora_video2-landscape', 'sora_video2-15s', 'sora_video2-landscape-15s'], default: 'sora_video2', description: 'Model to use. sora-2-pro uses Async API processing (3-5 mins), others use Sync Streaming.' },
-                input_image: { type: 'string', description: 'Optional base64 or URL of an image to animate' }
+                model: { 
+                    type: 'string', 
+                    enum: ['veo-3.1', 'veo-3.1-fast', 'sora-2', 'sora-2-pro', 'sora_video2'], 
+                    default: 'veo-3.1', 
+                    description: 'Model to use. Veo models support loops >15s. Sora models are mapped to specific sizes.' 
+                },
+                seconds: {
+                   type: 'integer',
+                   description: 'Duration in seconds. For Veo > 15s, it triggers a recursive generation loop.',
+                   example: 60
+                },
+                aspect_ratio: {
+                   type: 'string',
+                   enum: ['16:9', '9:16', '1:1'],
+                   default: '16:9',
+                   description: 'Aspect ratio of the generated video.'
+                },
+                input_images: {
+                   type: 'array',
+                   items: { type: 'string', format: 'base64' },
+                   description: 'List of base64 images. Use 1 image for Image-to-Video, or more for specific model features.'
+                },
+                input_image: { type: 'string', description: 'Legacy single image input (Base64/URL).' }
               },
             },
           },
